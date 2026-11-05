@@ -5,8 +5,11 @@ let DOCTOR_HOSPITAL_MAP = {};
 let PATIENT_PAYER_MAP = {}; 
 
 let CURRENT_USER_EMAIL = "";
-let CURRENT_DOCTOR_ID = null;
-let CURRENT_DOCTOR_NAME = null;
+let CURRENT_PRACTICE_RECORD = null;
+let CURRENT_PRACTICE_ID = null;
+let CURRENT_PRACTICE_NAME = "";
+let PRACTICE_DOCTOR_HOSPITAL_PAIRS = new Set();
+let ALL_DOCTORS = [];
 let ALLOWED_HOSPITALS = [];
 
 let PATIENT_INFO_MAP = {};
@@ -244,6 +247,7 @@ function hideLoading() {
 document.addEventListener("DOMContentLoaded", async function () {
 
   showLoading();
+  initSearchableSelect("f-doctor",   "All Doctors");
   initSearchableSelect("f-location", "All Hospitals");
   initSearchableSelect("f-patient",  "All Patients");
   initSearchableSelect("f-payer",    "All Payers");
@@ -304,135 +308,97 @@ document.addEventListener("DOMContentLoaded", async function () {
        API 1 -> Process -> API 2 -> Process -> API 3 -> Process -> API 4 -> ...
        -------------------------------------------------------------------------- */
 
-    /* [API 1]: Fetch doctor profiles sequentially */
-    setLoadingProgress(15, "Identifying doctor profile...");
-    let allDoctors = [];
+    /* [API 1]: Fetch practice profile sequentially from #Report:My_Practice */
+    setLoadingProgress(15, "Identifying practice profile...");
+    let allPractices = [];
     try {
-      allDoctors = await fetchRecordsWithFallback("Portal_Doctors1", "Doctors1", "All_Doctors");
-      if (!Array.isArray(allDoctors)) allDoctors = [];
-    } catch (docErr) {
-      console.warn("API 1 (Doctors) failed:", docErr);
-      allDoctors = [];
+      allPractices = await fetchRecordsWithFallback("My_Practice", "My_Practices", "All_Practices", "Practices", "Add_Practice_Report");
+      if (!Array.isArray(allPractices)) allPractices = [];
+    } catch (pracErr) {
+      console.warn("API 1 (Practice) failed:", pracErr);
+      allPractices = [];
     }
 
-    // Process API 1 data
-    let myDoctor = null;
-    if (CURRENT_USER_EMAIL && allDoctors.length) {
+    // Process API 1 data: match practice Contact Email with zoho.loginuser
+    let myPractice = null;
+    if (CURRENT_USER_EMAIL && allPractices.length) {
       const emailLower = CURRENT_USER_EMAIL.toLowerCase();
-      myDoctor = allDoctors.find(d => {
-        const docEmail = getDoctorEmail(d);
-        if (docEmail && docEmail === emailLower) return true;
-        if (d.ID && String(d.ID).trim() === CURRENT_USER_EMAIL) return true;
+      myPractice = allPractices.find(p => {
+        const pEmail = getPracticeContactEmail(p);
+        if (pEmail && pEmail === emailLower) return true;
+        if (p.ID && String(p.ID).trim() === CURRENT_USER_EMAIL) return true;
         return false;
       });
     }
 
-    if (myDoctor) {
-      CURRENT_DOCTOR_ID = myDoctor.ID;
-      CURRENT_DOCTOR_NAME = myDoctor.Doctor_Name
-        || myDoctor.Name?.zc_display_value
-        || (myDoctor.Name && (myDoctor.Name.first_name || myDoctor.Name.last_name)
-            ? `${myDoctor.Name.prefix || ""} ${myDoctor.Name.first_name || ""} ${myDoctor.Name.last_name || ""}`.trim()
-            : "")
-        || myDoctor.zc_display_value
-        || CURRENT_USER_EMAIL;
-    } else {
-      CURRENT_DOCTOR_ID = null;
-      CURRENT_DOCTOR_NAME = null;
+    if (!myPractice && !CURRENT_USER_EMAIL && allPractices.length > 0) {
+      myPractice = allPractices[0];
     }
 
-    const doctorDisplayEl = document.getElementById("f-doctor-display");
-    if (doctorDisplayEl) {
-      if (CURRENT_DOCTOR_NAME) {
-        doctorDisplayEl.textContent = CURRENT_DOCTOR_NAME;
-        doctorDisplayEl.title = `Logged in: ${CURRENT_DOCTOR_NAME} (${CURRENT_USER_EMAIL})`;
+    if (myPractice) {
+      CURRENT_PRACTICE_RECORD = myPractice;
+      CURRENT_PRACTICE_ID = myPractice.ID;
+      CURRENT_PRACTICE_NAME = myPractice.Practice_Name
+        || myPractice.zc_display_value
+        || myPractice.Practice_ID
+        || "My Practice";
+    } else {
+      CURRENT_PRACTICE_RECORD = null;
+      CURRENT_PRACTICE_ID = null;
+      CURRENT_PRACTICE_NAME = "";
+    }
+
+    const practiceDisplayEl = document.getElementById("f-practice-display");
+    if (practiceDisplayEl) {
+      if (CURRENT_PRACTICE_NAME) {
+        practiceDisplayEl.textContent = CURRENT_PRACTICE_NAME;
+        practiceDisplayEl.title = `Logged in Practice: ${CURRENT_PRACTICE_NAME} (${CURRENT_USER_EMAIL || "active"})`;
       } else if (CURRENT_USER_EMAIL) {
-        doctorDisplayEl.textContent = "Doctor profile not found";
-        doctorDisplayEl.title = `No doctor matched for email: ${CURRENT_USER_EMAIL}`;
+        practiceDisplayEl.textContent = "Practice profile not found";
+        practiceDisplayEl.title = `No practice matched for email: ${CURRENT_USER_EMAIL}`;
       } else {
-        doctorDisplayEl.textContent = "—";
+        practiceDisplayEl.textContent = "—";
       }
     }
 
-    /* [API 2]: Fetch claims for doctor sequentially */
-    setLoadingProgress(35, "Fetching claims for doctor...");
-    let allClaims = [];
-    try {
-      allClaims = await fetchRecordsWithFallback("Add_Claim_Report", "Doctors_Claim_Report");
-      if (!Array.isArray(allClaims)) allClaims = [];
-    } catch (claimsErr) {
-      console.warn("API 2 (Claims) failed:", claimsErr);
-      allClaims = [];
-    }
-
-    // Process API 2 data
-    let claims = allClaims;
-    if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
-      claims = allClaims.filter(c => isClaimForDoctor(c, CURRENT_DOCTOR_ID, CURRENT_DOCTOR_NAME));
-    } else if (CURRENT_USER_EMAIL) {
-      claims = [];
-    }
-    ALL_CLAIMS = claims;
-    FILTERED_DATA = claims;
-
-    /* [API 3]: Fetch doctor-hospital mappings sequentially */
-    setLoadingProgress(50, "Fetching hospital mappings...");
+    /* [API 2]: Fetch doctor & hospital mappings sequentially from #Report:Doctor_Hospital_Subform_Report */
+    setLoadingProgress(35, "Fetching doctor & hospital mappings...");
     let allMappings = [];
     try {
-      allMappings = await fetchRecordsWithFallback("Doctor_Hospital_Mappings", "All_Doctor_Hospital_Mappings1");
+      allMappings = await fetchRecordsWithFallback(
+        "Doctor_Hospital_Subform_Report",
+        "Doctor_Hospital_Subform",
+        "All_Doctor_Hospital_Subforms",
+        "Doctor_Hospital_Mappings",
+        "All_Doctor_Hospital_Mappings1"
+      );
       if (!Array.isArray(allMappings)) allMappings = [];
     } catch (mapErr) {
-      console.warn("API 3 (Mappings) failed:", mapErr);
+      console.warn("API 2 (Mappings) failed:", mapErr);
       allMappings = [];
     }
 
-    // Process API 3 data
-    buildDoctorHospitalMap(allMappings);
+    // Process API 2 data: build doctor-hospital map and pair set for the logged-in practice
+    buildDoctorHospitalMapForPractice(allMappings, CURRENT_PRACTICE_RECORD, CURRENT_PRACTICE_ID, CURRENT_PRACTICE_NAME);
 
-    let docHospitals = [];
-    if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
-      docHospitals = (CURRENT_DOCTOR_ID && DOCTOR_HOSPITAL_MAP[String(CURRENT_DOCTOR_ID)])
-        ? DOCTOR_HOSPITAL_MAP[String(CURRENT_DOCTOR_ID)]
-        : [];
-
-      if (docHospitals.length === 0 && CURRENT_DOCTOR_NAME && DOCTOR_HOSPITAL_MAP[CURRENT_DOCTOR_NAME.trim().toLowerCase()]) {
-        docHospitals = DOCTOR_HOSPITAL_MAP[CURRENT_DOCTOR_NAME.trim().toLowerCase()];
-      }
-
-      // If no hospital mappings found in table, extract active hospitals directly from doctor's claims
-      if (docHospitals.length === 0) {
-        const seenH = new Set();
-        const extracted = [];
-        (ALL_CLAIMS || []).forEach(c => {
-          const hid = getLookupId(c.Hospital) || c.Hospital_ID;
-          const hlabel = getLookupLabel(c.Hospital) || c.Hospital_Name;
-          if (hid && !seenH.has(String(hid))) {
-            seenH.add(String(hid));
-            extracted.push({ value: String(hid), label: hlabel || "Hospital" });
-          }
-        });
-        docHospitals = extracted;
-      }
-
-      ALLOWED_HOSPITALS = docHospitals;
-      ALL_HOSPITALS = ALLOWED_HOSPITALS;
+    /* [API 3]: Fetch practice claims sequentially from #Report:Practice_Claims */
+    setLoadingProgress(50, "Fetching practice claims...");
+    let allClaims = [];
+    try {
+      allClaims = await fetchRecordsWithFallback("Practice_Claims", "Add_Claim_Report", "Doctors_Claim_Report");
+      if (!Array.isArray(allClaims)) allClaims = [];
+    } catch (claimsErr) {
+      console.warn("API 3 (Practice Claims) failed:", claimsErr);
+      allClaims = [];
     }
 
-    // Only if still no hospitals resolved, sequentially fetch All_Hospitals as fallback
-    if (!ALL_HOSPITALS || !ALL_HOSPITALS.length) {
-      try {
-        const allHospitals = await fetchAllRecords("All_Hospitals");
-        if (Array.isArray(allHospitals) && allHospitals.length) {
-          ALL_HOSPITALS = allHospitals.map(hos => ({
-            value: String(hos.ID),
-            label: hos.Hospital_Name || hos.zc_display_value || "Hospital"
-          }));
-        }
-      } catch (hospErr) {
-        console.warn("Fallback All_Hospitals fetch failed:", hospErr);
-      }
-    }
-    populateHospitals(ALL_HOSPITALS);
+    // Process API 3 data: filter claims related to practice based on doctor & hospital matching
+    let claims = filterClaimsForPractice(allClaims, PRACTICE_DOCTOR_HOSPITAL_PAIRS, DOCTOR_HOSPITAL_MAP, CURRENT_PRACTICE_ID, CURRENT_PRACTICE_NAME);
+    ALL_CLAIMS = claims;
+    FILTERED_DATA = claims;
+
+    // Populate Doctor & Hospital dropdowns based on practice mappings & claims
+    populateDoctorsAndHospitalsForPractice(claims, allMappings, CURRENT_PRACTICE_RECORD, CURRENT_PRACTICE_ID, CURRENT_PRACTICE_NAME);
 
     /* [API 4]: Fetch patients sequentially */
     setLoadingProgress(65, "Fetching patient information...");
@@ -812,12 +778,230 @@ function getMultiSelectValues(id) {
    POPULATE FILTER DROPDOWNS
    =================================================== */
 
+
+function getPracticeContactEmail(p) {
+  if (!p) return "";
+  const val = p.Contact_Email ?? p.Contact_Email_field ?? p.Email ?? p.email ?? p.ContactEmail ?? "";
+  if (typeof val === "object" && val !== null) {
+    return String(val.value || val.email || val.zc_display_value || "").trim().toLowerCase();
+  }
+  return String(val).trim().toLowerCase();
+}
+
+function isSubformForPractice(row, practiceId, practiceName) {
+  if (!practiceId && !practiceName) return true;
+  const pVal = row.Add_Practice || row.Practice || row.Practice_ID;
+  const pId = getLookupId(pVal);
+  const pName = getLookupLabel(pVal);
+  if (practiceId && pId && String(pId).trim() === String(practiceId).trim()) return true;
+  if (practiceName && pName && pName.trim().toLowerCase() === practiceName.trim().toLowerCase()) return true;
+  return false;
+}
+
+function buildDoctorHospitalMapForPractice(mappings, practiceRecord, practiceId, practiceName) {
+  DOCTOR_HOSPITAL_MAP = {};
+  PRACTICE_DOCTOR_HOSPITAL_PAIRS = new Set();
+
+  function addMapping(docId, docName, hosId, hosLabel) {
+    if (!docId && !docName) return;
+    if (!hosId && !hosLabel) return;
+
+    const hValue = hosId ? String(hosId) : hosLabel;
+    const hLabel = hosLabel || hosId || "Hospital";
+
+    if (docId) {
+      const dKey = String(docId);
+      if (!DOCTOR_HOSPITAL_MAP[dKey]) DOCTOR_HOSPITAL_MAP[dKey] = [];
+      if (!DOCTOR_HOSPITAL_MAP[dKey].some(h => String(h.value) === hValue)) {
+        DOCTOR_HOSPITAL_MAP[dKey].push({ value: hValue, label: hLabel });
+      }
+    }
+
+    if (docName) {
+      const dNameKey = docName.trim().toLowerCase();
+      if (!DOCTOR_HOSPITAL_MAP[dNameKey]) DOCTOR_HOSPITAL_MAP[dNameKey] = [];
+      if (!DOCTOR_HOSPITAL_MAP[dNameKey].some(h => String(h.value) === hValue)) {
+        DOCTOR_HOSPITAL_MAP[dNameKey].push({ value: hValue, label: hLabel });
+      }
+    }
+
+    if (docId && hosId) PRACTICE_DOCTOR_HOSPITAL_PAIRS.add(`${String(docId)}|||${String(hosId)}`);
+    if (docName && hosLabel) PRACTICE_DOCTOR_HOSPITAL_PAIRS.add(`${docName.trim().toLowerCase()}|||${hosLabel.trim().toLowerCase()}`);
+    if (docId && hosLabel) PRACTICE_DOCTOR_HOSPITAL_PAIRS.add(`${String(docId)}|||${hosLabel.trim().toLowerCase()}`);
+    if (docName && hosId) PRACTICE_DOCTOR_HOSPITAL_PAIRS.add(`${docName.trim().toLowerCase()}|||${String(hosId)}`);
+  }
+
+  // 1) From Doctor_Hospital_Subform_Report
+  (mappings || []).forEach(m => {
+    if (isSubformForPractice(m, practiceId, practiceName)) {
+      const docVal = m.Doctor || m.Doctor_Name || m.Doctors || m.Doctor_ID;
+      const docId = getLookupId(docVal);
+      const docName = getLookupLabel(docVal) || (typeof docVal === "string" ? docVal : "");
+
+      const hosVal = m.Hospital || m.Hospital_Name || m.Hospitals || m.Hospital_ID;
+      const hosId = getLookupId(hosVal);
+      const hosLabel = getLookupLabel(hosVal);
+
+      addMapping(docId, docName, hosId, hosLabel);
+    }
+  });
+
+  // 2) From inline Doctor_Hospital_Mapping on practice record if present
+  if (practiceRecord && practiceRecord.Doctor_Hospital_Mapping) {
+    const inline = Array.isArray(practiceRecord.Doctor_Hospital_Mapping)
+      ? practiceRecord.Doctor_Hospital_Mapping
+      : (typeof practiceRecord.Doctor_Hospital_Mapping === "object" ? Object.values(practiceRecord.Doctor_Hospital_Mapping) : []);
+    inline.forEach(m => {
+      const docVal = m.Doctor || m.Doctor_Name || m.Doctor_ID;
+      const docId = getLookupId(docVal);
+      const docName = getLookupLabel(docVal) || (typeof docVal === "string" ? docVal : "");
+
+      const hosVal = m.Hospital || m.Hospital_Name || m.Hospital_ID;
+      const hosId = getLookupId(hosVal);
+      const hosLabel = getLookupLabel(hosVal);
+
+      addMapping(docId, docName, hosId, hosLabel);
+    });
+  }
+
+  Object.keys(DOCTOR_HOSPITAL_MAP).forEach(dKey => {
+    DOCTOR_HOSPITAL_MAP[dKey].sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+  console.log("Doctor->Hospital map built for practice:", DOCTOR_HOSPITAL_MAP);
+  console.log("Practice Doctor-Hospital pairs:", PRACTICE_DOCTOR_HOSPITAL_PAIRS);
+}
+
+function isClaimMatchingPractice(c, pairSet, docHosMap, practiceId, practiceName) {
+  const cPracVal = c.Add_Practice || c.Practice || c.Practice_ID;
+  const cPracId = getLookupId(cPracVal);
+  const cPracName = getLookupLabel(cPracVal);
+  if (practiceId && cPracId && String(cPracId) === String(practiceId)) return true;
+  if (practiceName && cPracName && cPracName.trim().toLowerCase() === practiceName.trim().toLowerCase()) return true;
+
+  const docId = getLookupId(c.Doctor) || c.Doctor_ID;
+  const docName = getLookupLabel(c.Doctor) || c.Doctor_Name || (typeof c.Doctor === "string" ? c.Doctor : "");
+  const hosId = getLookupId(c.Hospital) || c.Hospital_ID;
+  const hosName = getLookupLabel(c.Hospital) || c.Hospital_Name;
+
+  if (pairSet && pairSet.size > 0) {
+    if (docId && hosId && pairSet.has(`${String(docId)}|||${String(hosId)}`)) return true;
+    if (docName && hosName && pairSet.has(`${docName.trim().toLowerCase()}|||${hosName.trim().toLowerCase()}`)) return true;
+    if (docId && hosName && pairSet.has(`${String(docId)}|||${hosName.trim().toLowerCase()}`)) return true;
+    if (docName && hosId && pairSet.has(`${docName.trim().toLowerCase()}|||${String(hosId)}`)) return true;
+    return false;
+  }
+
+  if (docHosMap && Object.keys(docHosMap).length > 0) {
+    const list = (docId && docHosMap[String(docId)]) || (docName && docHosMap[docName.trim().toLowerCase()]) || [];
+    if (list.length > 0) {
+      if (hosId && list.some(h => String(h.value) === String(hosId))) return true;
+      if (hosName && list.some(h => h.label.trim().toLowerCase() === hosName.trim().toLowerCase())) return true;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function filterClaimsForPractice(allClaims, pairSet, docHosMap, practiceId, practiceName) {
+  if (!Array.isArray(allClaims)) return [];
+  if (pairSet && pairSet.size > 0) {
+    const matched = allClaims.filter(c => isClaimMatchingPractice(c, pairSet, docHosMap, practiceId, practiceName));
+    if (matched.length > 0) return matched;
+  }
+  return allClaims;
+}
+
+function populateDoctorsAndHospitalsForPractice(claims, mappings, practiceRecord, practiceId, practiceName) {
+  const docMap = new Map();
+  const hosMap = new Map();
+
+  function addDoc(id, name) {
+    if (!id && !name) return;
+    const key = id ? String(id) : name.trim().toLowerCase();
+    if (!docMap.has(key)) {
+      docMap.set(key, {
+        value: id ? String(id) : name,
+        label: name || id || "Doctor"
+      });
+    }
+  }
+
+  function addHos(id, name) {
+    if (!id && !name) return;
+    const key = id ? String(id) : name.trim().toLowerCase();
+    if (!hosMap.has(key)) {
+      hosMap.set(key, {
+        value: id ? String(id) : name,
+        label: name || id || "Hospital"
+      });
+    }
+  }
+
+  // 1) From Doctor_Hospital_Subform_Report
+  (mappings || []).forEach(m => {
+    if (isSubformForPractice(m, practiceId, practiceName)) {
+      const docVal = m.Doctor || m.Doctor_Name || m.Doctors || m.Doctor_ID;
+      addDoc(getLookupId(docVal), getLookupLabel(docVal));
+
+      const hosVal = m.Hospital || m.Hospital_Name || m.Hospitals || m.Hospital_ID;
+      addHos(getLookupId(hosVal), getLookupLabel(hosVal));
+    }
+  });
+
+  // 2) From inline Doctor_Hospital_Mapping on practice record
+  if (practiceRecord && practiceRecord.Doctor_Hospital_Mapping) {
+    const inline = Array.isArray(practiceRecord.Doctor_Hospital_Mapping)
+      ? practiceRecord.Doctor_Hospital_Mapping
+      : (typeof practiceRecord.Doctor_Hospital_Mapping === "object" ? Object.values(practiceRecord.Doctor_Hospital_Mapping) : []);
+    inline.forEach(m => {
+      const docVal = m.Doctor || m.Doctor_Name || m.Doctor_ID;
+      addDoc(getLookupId(docVal), getLookupLabel(docVal));
+      const hosVal = m.Hospital || m.Hospital_Name || m.Hospital_ID;
+      addHos(getLookupId(hosVal), getLookupLabel(hosVal));
+    });
+  }
+
+  // 3) From practice claims
+  (claims || []).forEach(c => {
+    const docId = getLookupId(c.Doctor) || c.Doctor_ID;
+    const docName = getLookupLabel(c.Doctor) || c.Doctor_Name || (typeof c.Doctor === "string" ? c.Doctor : "");
+    addDoc(docId, docName);
+
+    const hosId = getLookupId(c.Hospital) || c.Hospital_ID;
+    const hosName = getLookupLabel(c.Hospital) || c.Hospital_Name;
+    addHos(hosId, hosName);
+
+    if (docId || docName) {
+      const dKey = docId ? String(docId) : docName.trim().toLowerCase();
+      if (!DOCTOR_HOSPITAL_MAP[dKey]) DOCTOR_HOSPITAL_MAP[dKey] = [];
+      const hVal = hosId ? String(hosId) : hosName;
+      const hLabel = hosName || hosId || "Hospital";
+      if (!DOCTOR_HOSPITAL_MAP[dKey].some(h => String(h.value) === String(hVal))) {
+        DOCTOR_HOSPITAL_MAP[dKey].push({ value: String(hVal), label: hLabel });
+      }
+    }
+  });
+
+  ALL_DOCTORS = Array.from(docMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+  ALL_HOSPITALS = Array.from(hosMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+  ALLOWED_HOSPITALS = ALL_HOSPITALS;
+
+  populateDoctors(ALL_DOCTORS);
+  populateHospitals(ALL_HOSPITALS);
+}
+
 function populateDoctors(doctors) {
-  const items = doctors.map(doc => ({
-    value: doc.ID,
-    label: doc.Doctor_Name || doc.zc_display_value
-  }));
-  setSearchableOptions("f-doctor", items, "All Doctors");
+  ALL_DOCTORS = (doctors || []).map(doc => {
+    if (doc.value && doc.label) return doc;
+    return {
+      value: String(doc.ID || doc.id || ""),
+      label: doc.Doctor_Name || doc.zc_display_value || "Doctor"
+    };
+  });
+  ALL_DOCTORS.sort((a, b) => a.label.localeCompare(b.label));
+  setSearchableOptions("f-doctor", ALL_DOCTORS, "All Doctors");
 }
 function buildPatientPayerMap(patients) {
   PATIENT_PAYER_MAP = {};
@@ -967,51 +1151,31 @@ function isClaimForDoctor(c, doctorId, doctorName) {
 
 // Populate the Patient dropdown strictly based on the doctor's claims & patients
 function populatePatients(patients, claims) {
-  let relevantPatients = patients || [];
+  const patientMap = new Map();
 
-  if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
-    const doctorPatientIds = new Set();
+  // 1) From practice claims (#Report:Practice_Claims Patient)
+  (claims || ALL_CLAIMS || []).forEach(c => {
+    const pid = getLookupId(c.Patient) || c.Patient_ID;
+    const pLabel = getLookupLabel(c.Patient) || "Patient";
+    if (pid) {
+      const enriched = PATIENT_INFO_MAP[pid];
+      patientMap.set(String(pid), {
+        value: String(pid),
+        label: enriched ? enriched.label : pLabel
+      });
+    }
+  });
 
-    // 1) From doctor's claims
-    (claims || ALL_CLAIMS || []).forEach(c => {
-      const pid = getLookupId(c.Patient) || c.Patient_ID;
-      if (pid) doctorPatientIds.add(String(pid));
-    });
-
-    // 2) From patient records linked to doctor
-    (patients || []).forEach(p => {
-      const docId = getLookupId(p.Doctor) || p.Doctor_ID;
-      const docName = getLookupLabel(p.Doctor) || p.Doctor_Name;
-      if (
-        (CURRENT_DOCTOR_ID && docId && String(docId) === String(CURRENT_DOCTOR_ID)) ||
-        (CURRENT_DOCTOR_NAME && docName && docName.trim().toLowerCase() === CURRENT_DOCTOR_NAME.trim().toLowerCase())
-      ) {
-        if (p.ID) doctorPatientIds.add(String(p.ID));
-      }
-    });
-
-    relevantPatients = (patients || []).filter(p => p.ID && doctorPatientIds.has(String(p.ID)));
-
-    // Ensure any patient appearing on doctor's claims is present even if not in patients catalog
-    const seen = new Set(relevantPatients.map(p => String(p.ID)));
-    (claims || ALL_CLAIMS || []).forEach(c => {
-      const pid = getLookupId(c.Patient) || c.Patient_ID;
-      if (pid && !seen.has(String(pid))) {
-        seen.add(String(pid));
-        const pLabel = getLookupLabel(c.Patient) || "Patient";
-        if (!PATIENT_INFO_MAP[pid]) {
-          PATIENT_INFO_MAP[pid] = { value: String(pid), label: pLabel };
-        }
-        relevantPatients.push({ ID: pid });
+  // 2) Supplement from patient module if needed
+  if (patientMap.size === 0 && Array.isArray(patients)) {
+    patients.forEach(p => {
+      if (p.ID && PATIENT_INFO_MAP[p.ID]) {
+        patientMap.set(String(p.ID), PATIENT_INFO_MAP[p.ID]);
       }
     });
   }
 
-  const items = relevantPatients
-    .filter(p => p.ID && PATIENT_INFO_MAP[p.ID])
-    .map(p => PATIENT_INFO_MAP[p.ID]);
-
-  items.sort((a, b) => a.label.localeCompare(b.label));
+  const items = Array.from(patientMap.values()).sort((a, b) => a.label.localeCompare(b.label));
   setSearchableOptions("f-patient", items, "All Patients");
 }
 // Helper to resolve patient value/label consistently everywhere — sourced from Patients module
@@ -1105,18 +1269,38 @@ function updateLocationOptionsForDoctor(doctorId) {
   const locWrapper = document.getElementById("f-location");
   if (!locWrapper) return;
 
-  // Reset the current Hospital selection since doctor changed
+  // Reset current Hospital selection since doctor changed
   locWrapper.dataset.value = "";
   locWrapper.querySelector(".ss-value").textContent = "All Hospitals";
 
   if (!doctorId) {
-    // No doctor selected -> show every hospital
+    // Show all hospitals for this practice
     setSearchableOptions("f-location", ALL_HOSPITALS, "All Hospitals");
     return;
   }
 
-  const mapped = DOCTOR_HOSPITAL_MAP[String(doctorId)] || [];
-  // If doctor has mapped hospitals, show them. Otherwise fallback to ALL_HOSPITALS so user is never blocked
+  let mapped = DOCTOR_HOSPITAL_MAP[String(doctorId)] || [];
+  if (mapped.length === 0) {
+    const docObj = ALL_DOCTORS.find(d => String(d.value) === String(doctorId));
+    if (docObj && docObj.label && DOCTOR_HOSPITAL_MAP[docObj.label.trim().toLowerCase()]) {
+      mapped = DOCTOR_HOSPITAL_MAP[docObj.label.trim().toLowerCase()];
+    }
+  }
+
+  // Fallback to active claims for this doctor if no explicit mapping
+  if (mapped.length === 0) {
+    const seenH = new Set();
+    const docClaims = (ALL_CLAIMS || []).filter(c => isClaimForDoctor(c, doctorId, null));
+    docClaims.forEach(c => {
+      const hid = getLookupId(c.Hospital) || c.Hospital_ID;
+      const hlabel = getLookupLabel(c.Hospital) || c.Hospital_Name;
+      if (hid && !seenH.has(String(hid))) {
+        seenH.add(String(hid));
+        mapped.push({ value: String(hid), label: hlabel || "Hospital" });
+      }
+    });
+  }
+
   const options = mapped.length ? mapped : ALL_HOSPITALS;
   setSearchableOptions("f-location", options, "All Hospitals");
 }
@@ -1254,6 +1438,7 @@ document.addEventListener("click", () => {
    =================================================== */
 // runReport() â€” read multiple patient IDs
 function runReport() {
+  const doctorId   = getSearchableValue("f-doctor");
   const hospitalId = getSearchableValue("f-location");
   const patientId  = getSearchableValue("f-patient");
   const payerId    = getSearchableValue("f-payer");
@@ -1267,6 +1452,10 @@ function runReport() {
     const s = String(c.Status?.zc_display_value || c.Status || "").trim().toLowerCase();
     return s === "fully paid";
   });
+
+  if (doctorId) {
+    filtered = filtered.filter(c => isClaimForDoctor(c, doctorId, null));
+  }
 
   if (hospitalId) {
     filtered = filtered.filter(c => {
@@ -2456,6 +2645,9 @@ async function exportExcel() {
     const aoa = [];
 
     aoa.push(["Claims Turnaround Time Report"]);
+    if (info.practice) {
+      aoa.push([`Practice: ${info.practice}`]);
+    }
     aoa.push([`Doctor: ${info.doctor || "All"}`]);
     aoa.push([`Hospital: ${info.hospital || "All"}`]);
     aoa.push([`Date Range: ${formatDateRange(info.dateFrom, info.dateTo)}`]);
@@ -2657,9 +2849,11 @@ function getFilterDisplayLabel(id, fallback) {
 
 function getActiveFilterInfo() {
   return {
-    doctor:   CURRENT_DOCTOR_NAME || "All Doctors",
+    practice: CURRENT_PRACTICE_NAME || "All Practices",
+    doctor:   getFilterDisplayLabel("f-doctor", "All Doctors"),
     hospital: getFilterDisplayLabel("f-location", "All Hospitals"),
     patient:  getFilterDisplayLabel("f-patient",  "All Patients"),
+    payer:    getFilterDisplayLabel("f-payer",    "All Payers"),
     dateFrom: (document.getElementById("f-from") || {}).value || "",
     dateTo:   (document.getElementById("f-to")   || {}).value || ""
   };
@@ -2749,12 +2943,14 @@ function resetMultiSelect(id, allLabel) {
 }
 
 function resetFilters() {
-  ["f-location", "f-patient", "f-payer"].forEach(id => {
+  ["f-doctor", "f-location", "f-patient", "f-payer"].forEach(id => {
     const wrapper = document.getElementById(id);
     if (!wrapper) return;
     wrapper.dataset.value = "";
     wrapper.querySelector(".ss-value").textContent = wrapper.dataset.allLabel || "All";
   });
+
+  setSearchableOptions("f-location", ALL_HOSPITALS, "All Hospitals");
 
   const itemWrapper = document.getElementById("f-itemnumber");
   if (itemWrapper) {
@@ -3154,6 +3350,7 @@ function drawHeader(doc, pageW, margin, info) {
   doc.line(margin + 12, sepY, pageW - margin, sepY);
 
   const items = [
+    ...(info.practice ? [{ icon: "hospital", label: "PRACTICE", value: info.practice }] : []),
     { icon: "person",   label: "DOCTOR",        value: info.doctor },
     { icon: "hospital", label: "HOSPITAL",      value: info.hospital },
     { icon: "calendar", label: "REPORT PERIOD", value: info.date },
